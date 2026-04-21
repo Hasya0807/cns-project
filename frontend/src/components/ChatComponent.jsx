@@ -4,21 +4,25 @@ import axios from 'axios';
 import {
   encryptMessageClient,
   decryptMessageClient,
+  encryptMessageGCM,
+  decryptMessageGCM,
   storeEncryptionKey,
   getEncryptionKey,
-  generateEncryptionKey,
   generateSharedKey
 } from '../utils/encryption';
+import { loadOrCreateIdentityKeyPair, deriveConversationKey } from '../utils/e2eeKeys';
 
 const ChatComponent = ({ currentUserId, currentUsername }) => {
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [users, setUsers] = useState([]);
   const [onlineUsers, setOnlineUsers] = useState(new Set());
   const [isTyping, setIsTyping] = useState(false);
-  const [encryptionKey, setEncryptionKey] = useState(null);
   const [loading, setLoading] = useState(false);
+  const privateKeyRef = useRef(null);
+  const publicKeyUploadRef = useRef(false);
   const socketRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -32,58 +36,96 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    const initializeIdentityKey = async () => {
+      try {
+        await ensureIdentityReady();
+      } catch (error) {
+        console.error('Failed to initialize identity key:', error);
+      }
+    };
+
+    initializeIdentityKey();
+  }, []);
+
+  const ensureIdentityReady = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      return false;
+    }
+
+    const identity = await loadOrCreateIdentityKeyPair();
+    privateKeyRef.current = identity.privateKey;
+
+    if (!publicKeyUploadRef.current) {
+      await axios.put(
+        `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/users/keys`,
+        { identityPublicKey: identity.publicKey },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      publicKeyUploadRef.current = true;
+    }
+
+    return true;
+  };
+
   // Initialize Socket.io connection
   useEffect(() => {
     socketRef.current = io(process.env.REACT_APP_SERVER_URL || 'http://localhost:5000');
 
     socketRef.current.on('connect', () => {
-      console.log('Connected to server');
       socketRef.current.emit('register-user', currentUserId);
     });
 
-    socketRef.current.on('receive-message', (data) => {
+    socketRef.current.on('receive-message', async (data) => {
       const { senderId, encryptedMessage, timestamp } = data;
-      
-      console.log('Received message from:', senderId);
 
       // Show messages from any user, not just selected
       try {
-        // Use locally stored encryption key for this conversation
-        const key = getEncryptionKey(senderId);
-        console.log('Using stored key for sender:', key ? 'Found' : 'Not found');
-        
-        if (key) {
-          const decrypted = decryptMessageClient(
+        await ensureIdentityReady();
+        const token = localStorage.getItem('token');
+        const userResponse = await axios.get(
+          `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/users/${senderId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        const remoteIdentityKey = userResponse.data.user.identityPublicKey;
+        let decrypted;
+        if (encryptedMessage.alg === 'AES-256-GCM' && remoteIdentityKey && privateKeyRef.current) {
+          const conversationKey = await deriveConversationKey(
+            privateKeyRef.current,
+            remoteIdentityKey,
+            currentUserId,
+            senderId
+          );
+          decrypted = await decryptMessageGCM(
             encryptedMessage.encryptedMessage,
-            key,
+            conversationKey,
+            encryptedMessage.iv,
+            encryptedMessage.authTag
+          );
+        } else {
+          let legacyKey = getEncryptionKey(senderId);
+          if (!legacyKey) {
+            legacyKey = generateSharedKey(currentUserId, senderId);
+            storeEncryptionKey(senderId, legacyKey);
+          }
+          decrypted = decryptMessageClient(
+            encryptedMessage.encryptedMessage,
+            legacyKey,
             encryptedMessage.iv
           );
-          
-          console.log('Decrypted message:', decrypted);
-          
-          // Only update UI if this is the currently selected conversation
-          if (senderId === selectedUserId) {
-            setMessages(prev => [...prev, {
-              _id: Math.random(),
-              senderId,
-              receiverId: currentUserId,
-              message: decrypted,
-              createdAt: timestamp,
-              isOwn: false
-            }]);
-          }
-        } else {
-          console.error('No encryption key available for sender:', senderId);
-          if (senderId === selectedUserId) {
-            setMessages(prev => [...prev, {
-              _id: Math.random(),
-              senderId,
-              receiverId: currentUserId,
-              message: '[No encryption key - start a new conversation]',
-              createdAt: timestamp,
-              isOwn: false
-            }]);
-          }
+        }
+
+        if (senderId === selectedUserId) {
+          setMessages(prev => [...prev, {
+            _id: Math.random(),
+            senderId,
+            receiverId: currentUserId,
+            message: decrypted,
+            createdAt: timestamp,
+            isOwn: false
+          }]);
         }
       } catch (error) {
         console.error('Failed to decrypt message:', error);
@@ -131,6 +173,9 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     const fetchUsers = async () => {
       try {
         const token = localStorage.getItem('token');
+        if (!token) {
+          return;
+        }
         const response = await axios.get(`${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/users`, {
           headers: { Authorization: `Bearer ${token}` }
         });
@@ -141,6 +186,9 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     };
 
     fetchUsers();
+
+    const refreshInterval = setInterval(fetchUsers, 20000);
+    return () => clearInterval(refreshInterval);
   }, []);
 
   // Fetch conversation history
@@ -148,39 +196,55 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
+      await ensureIdentityReady();
       const response = await axios.get(
         `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/messages/conversation/${userId}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
-      console.log('Fetched messages:', response.data.messages.length);
+      const userResponse = await axios.get(
+        `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/users/${userId}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
 
-      // Get or generate shared encryption key for this conversation
-      // Both users will generate the same key based on their user IDs
+      const remoteIdentityKey = userResponse.data.user.identityPublicKey;
+      let gcmConversationKey = null;
+      if (remoteIdentityKey && privateKeyRef.current) {
+        gcmConversationKey = await deriveConversationKey(
+          privateKeyRef.current,
+          remoteIdentityKey,
+          currentUserId,
+          userId
+        );
+      }
+
+      // Keep legacy key path for old messages
       let key = getEncryptionKey(userId);
       if (!key) {
-        console.log('No existing key found, generating shared key');
         key = generateSharedKey(currentUserId, userId);
         storeEncryptionKey(userId, key);
-      } else {
-        console.log('Using existing key for conversation');
       }
-      setEncryptionKey(key);
 
       // Decrypt all messages
-      const decryptedMessages = response.data.messages.map(msg => {
+      const decryptedMessages = await Promise.all(response.data.messages.map(async (msg) => {
         try {
-          console.log('Attempting to decrypt message:', msg._id);
-          const decrypted = decryptMessageClient(
-            msg.encryptedMessage,
-            key,
-            msg.iv
-          );
-          console.log('Decrypted result:', decrypted);
-          
+          let decrypted;
+          if (msg.alg === 'AES-256-GCM' && msg.authTag && gcmConversationKey) {
+            decrypted = await decryptMessageGCM(
+              msg.encryptedMessage,
+              gcmConversationKey,
+              msg.iv,
+              msg.authTag
+            );
+          } else {
+            decrypted = decryptMessageClient(
+              msg.encryptedMessage,
+              key,
+              msg.iv
+            );
+          }
           // Check if decryption actually worked (not empty)
           if (!decrypted || decrypted.trim() === '') {
-            console.warn('Decryption returned empty string for:', msg._id);
             return { 
               ...msg, 
               message: '🔒 [Old message - key no longer available]', 
@@ -188,7 +252,6 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
             };
           }
           
-          console.log('Successfully decrypted:', decrypted);
           return {
             ...msg,
             message: decrypted,
@@ -203,16 +266,9 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
             isOwn: msg.senderId._id === currentUserId 
           };
         }
-      });
+      }));
 
-      console.log('Setting messages:', decryptedMessages.length);
       setMessages(decryptedMessages);
-      
-      // Check if there are unreadable messages
-      const unreadableCount = decryptedMessages.filter(m => m.message?.includes('🔒')).length;
-      if (unreadableCount > 0) {
-        console.warn(`${unreadableCount} messages could not be decrypted (wrong encryption key)`);
-      }
     } catch (error) {
       console.error('Failed to fetch conversation:', error);
     } finally {
@@ -230,62 +286,85 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
   // Handle send message
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    
-    // Debugging logs
-    console.log('Send button clicked');
-    console.log('Input message:', inputMessage);
-    console.log('Selected user ID:', selectedUserId);
-    console.log('Encryption key:', encryptionKey);
 
     if (!inputMessage.trim()) {
-      console.log('Message is empty');
       return;
     }
     
     if (!selectedUserId) {
-      console.log('No user selected');
       alert('Please select a user first');
       return;
     }
     
-    // Get or generate shared encryption key
-    let currentKey = encryptionKey;
-    if (!currentKey) {
-      currentKey = getEncryptionKey(selectedUserId);
-      if (!currentKey) {
-        console.log('No encryption key found, generating shared key');
-        currentKey = generateSharedKey(currentUserId, selectedUserId);
-        storeEncryptionKey(selectedUserId, currentKey);
-        setEncryptionKey(currentKey);
-      }
-    }
-
-    console.log('Using key for encryption (length):', currentKey?.length);
-
     try {
-      // Encrypt message on client side (true end-to-end encryption)
-      const { encryptedMessage, iv } = encryptMessageClient(
-        inputMessage,
-        currentKey
-      );
-
-      console.log('Message encrypted successfully');
-
-      // Send encrypted message to server (server never sees plaintext)
       const token = localStorage.getItem('token');
-      console.log('Sending to backend...');
+      if (!token) {
+        alert('Session expired. Please login again.');
+        return;
+      }
+
+      await ensureIdentityReady();
+
+      let selectedUser = users.find((user) => user._id === selectedUserId);
+      let recipientIdentityKey = selectedUser?.identityPublicKey;
+
+      if (!recipientIdentityKey) {
+        const latestUserResponse = await axios.get(
+          `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/users/${selectedUserId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        recipientIdentityKey = latestUserResponse.data.user?.identityPublicKey;
+      }
+
+      let encryptedPayload;
+      if (recipientIdentityKey && privateKeyRef.current) {
+        const conversationKey = await deriveConversationKey(
+          privateKeyRef.current,
+          recipientIdentityKey,
+          currentUserId,
+          selectedUserId
+        );
+
+        const { encryptedMessage, iv, authTag } = await encryptMessageGCM(
+          inputMessage,
+          conversationKey
+        );
+        encryptedPayload = {
+          encryptedMessage,
+          iv,
+          authTag,
+          alg: 'AES-256-GCM',
+          version: 2
+        };
+      } else {
+        // Backward-compatible fallback for users who have not initialized E2E keys yet.
+        let legacyKey = getEncryptionKey(selectedUserId);
+        if (!legacyKey) {
+          legacyKey = generateSharedKey(currentUserId, selectedUserId);
+          storeEncryptionKey(selectedUserId, legacyKey);
+        }
+        const { encryptedMessage, iv } = encryptMessageClient(inputMessage, legacyKey);
+        encryptedPayload = {
+          encryptedMessage,
+          iv,
+          authTag: null,
+          alg: 'AES-256-CBC',
+          version: 1
+        };
+      }
       
       const response = await axios.post(
         `${process.env.REACT_APP_SERVER_URL || 'http://localhost:5000'}/api/messages/send`,
         {
           receiverId: selectedUserId,
-          encryptedMessage: encryptedMessage,
-          iv: iv
+          encryptedMessage: encryptedPayload.encryptedMessage,
+          iv: encryptedPayload.iv,
+          authTag: encryptedPayload.authTag,
+          alg: encryptedPayload.alg,
+          version: encryptedPayload.version
         },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-
-      console.log('Backend response:', response.data);
 
       // Add to local state
       setMessages(prev => [...prev, {
@@ -302,16 +381,16 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
         senderId: currentUserId,
         receiverId: selectedUserId,
         encryptedMessage: {
-          encryptedMessage,
-          iv
+          encryptedMessage: encryptedPayload.encryptedMessage,
+          iv: encryptedPayload.iv,
+          authTag: encryptedPayload.authTag,
+          alg: encryptedPayload.alg,
+          version: encryptedPayload.version
         }
       });
-
-      console.log('Message sent successfully');
       setInputMessage('');
     } catch (error) {
       console.error('Failed to send message:', error);
-      console.error('Error details:', error.response?.data);
       alert(`Failed to send message: ${error.response?.data?.message || error.message}`);
     }
   };
@@ -358,55 +437,18 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     return colors[index];
   };
 
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredUsers = users.filter((user) => {
+    if (!normalizedSearch) return true;
+    const username = (user.username || '').toLowerCase();
+    const email = (user.email || '').toLowerCase();
+    return username.includes(normalizedSearch) || email.includes(normalizedSearch);
+  });
+
   return (
     <div className="flex h-screen bg-gradient-to-br from-blue-100 via-cyan-50 to-blue-50">
-      {/* Left Navigation Icons */}
-      <div className="w-20 bg-white flex flex-col items-center py-6 space-y-6 shadow-sm">
-        <div className="w-12 h-12 bg-black rounded-2xl flex items-center justify-center cursor-pointer">
-          <svg className="w-7 h-7 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
-          </svg>
-        </div>
-        
-        <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center cursor-pointer hover:bg-gray-200 transition-colors">
-          <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-          </svg>
-        </div>
-        
-        <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center cursor-pointer hover:bg-gray-200 transition-colors">
-          <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-        </div>
-        
-        <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center cursor-pointer hover:bg-gray-200 transition-colors">
-          <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </div>
-        
-        <div className="flex-1"></div>
-        
-        <div className="w-12 h-12 bg-black rounded-2xl flex items-center justify-center cursor-pointer">
-          <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z"/>
-          </svg>
-        </div>
-        
-        <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center cursor-pointer hover:bg-gray-200 transition-colors">
-          <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-          </svg>
-        </div>
-        
-        <div className="w-12 h-12 bg-black rounded-2xl flex items-center justify-center cursor-pointer">
-          <span className="text-white font-bold text-xl">N</span>
-        </div>
-      </div>
-
       {/* Users List - Messages Sidebar */}
-      <div className="w-96 bg-white flex flex-col shadow-lg">
+      <div className="w-80 bg-white flex flex-col shadow-lg">
         {/* Search */}
         <div className="p-6 pb-4">
           <div className="relative">
@@ -415,6 +457,8 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
             </svg>
             <input 
               type="text" 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search" 
               className="w-full pl-12 pr-4 py-3 text-sm bg-gray-50 border-0 rounded-xl focus:ring-2 focus:ring-gray-200 focus:outline-none text-gray-900 placeholder-gray-400"
             />
@@ -428,7 +472,7 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
         
         {/* Conversations List */}
         <div className="flex-1 overflow-y-auto">
-          {users.map(user => (
+          {filteredUsers.map(user => (
             <div
               key={user._id}
               onClick={() => handleSelectUser(user._id)}
@@ -461,6 +505,11 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
               </div>
             </div>
           ))}
+          {filteredUsers.length === 0 && (
+            <div className="px-6 py-8 text-center text-sm text-gray-500">
+              No users match your search.
+            </div>
+          )}
         </div>
       </div>
 
@@ -469,7 +518,7 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
         {selectedUserId ? (
           <>
             {/* Chat Header */}
-            <div className="bg-white shadow-sm px-8 py-5 flex items-center justify-between">
+            <div className="bg-white shadow-sm px-6 py-4 flex items-center justify-between">
               <div className="flex items-center space-x-4">
                 <div className="relative">
                   <div className={`w-12 h-12 rounded-full ${getAvatarColor(users.find(u => u._id === selectedUserId)?.username)} flex items-center justify-center text-white font-semibold`}>
@@ -488,27 +537,11 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
                   </p>
                 </div>
               </div>
-              <div className="flex items-center space-x-3">
-                <button className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors">
-                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                  </svg>
-                </button>
-                <button className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors">
-                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                </button>
-                <button className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors">
-                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </button>
-              </div>
+              <div />
             </div>
 
             {/* Messages - Clean Layout */}
-            <div className="flex-1 overflow-y-auto px-8 py-6 bg-cream-100">
+            <div className="flex-1 overflow-y-auto px-6 py-5 bg-cream-100">
               {loading ? (
                 <div className="flex items-center justify-center h-full">
                   <div className="text-center">
@@ -577,16 +610,8 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
             </div>
 
             {/* Input - Docked Bottom Design */}
-            <form onSubmit={handleSendMessage} className="bg-white px-8 py-5 border-t border-gray-100">
+            <form onSubmit={handleSendMessage} className="bg-white px-6 py-4 border-t border-gray-100">
               <div className="flex gap-3 items-center">
-                <button
-                  type="button"
-                  className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                  </svg>
-                </button>
                 <input
                   type="text"
                   value={inputMessage}
@@ -599,7 +624,6 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
                   type="submit"
                   disabled={!inputMessage.trim() || !selectedUserId}
                   className="flex-shrink-0 w-11 h-11 rounded-full bg-chat-dark hover:bg-gray-900 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center text-white transition-all shadow-md"
-                  onClick={() => console.log('Button clicked directly')}
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />

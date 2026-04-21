@@ -9,8 +9,13 @@ function App() {
   // Check if user is already logged in
   useEffect(() => {
     const storedUser = localStorage.getItem('user');
+    const storedToken = localStorage.getItem('token');
     if (storedUser) {
       try {
+        if (!storedToken) {
+          localStorage.removeItem('user');
+          return;
+        }
         setUser(JSON.parse(storedUser));
       } catch (error) {
         localStorage.removeItem('user');

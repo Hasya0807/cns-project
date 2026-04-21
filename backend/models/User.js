@@ -25,6 +25,10 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true
     },
+    identityPublicKey: {
+      type: String,
+      default: null
+    },
     avatar: {
       type: String,
       default: null

@@ -14,7 +14,7 @@ router.get('/', protect, async (req, res) => {
     const currentUserId = req.user.id;
 
     const users = await User.find({ _id: { $ne: currentUserId } }).select(
-      'username email avatar status lastSeen publicKey'
+      'username email avatar status lastSeen publicKey identityPublicKey'
     );
 
     res.status(200).json({
@@ -28,6 +28,40 @@ router.get('/', protect, async (req, res) => {
 });
 
 /**
+ * @route   PUT /api/users/keys
+ * @desc    Save/update current user's E2E identity public key
+ * @access  Private
+ */
+router.put('/keys', protect, async (req, res) => {
+  try {
+    const { identityPublicKey } = req.body;
+
+    if (!identityPublicKey) {
+      return res.status(400).json({ message: 'identityPublicKey is required' });
+    }
+
+    const isBase64 = /^[A-Za-z0-9+/=]+$/.test(identityPublicKey);
+    if (!isBase64 || identityPublicKey.length < 80) {
+      return res.status(400).json({ message: 'identityPublicKey format is invalid' });
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user.id,
+      { identityPublicKey },
+      { new: true }
+    ).select('id username identityPublicKey');
+
+    res.status(200).json({
+      success: true,
+      user: updatedUser
+    });
+  } catch (error) {
+    console.error('Update identity key error:', error);
+    res.status(500).json({ message: 'Server error while updating identity key' });
+  }
+});
+
+/**
  * @route   GET /api/users/:userId
  * @desc    Get user by ID
  * @access  Private
@@ -37,7 +71,7 @@ router.get('/:userId', protect, async (req, res) => {
     const { userId } = req.params;
 
     const user = await User.findById(userId).select(
-      'username email avatar status lastSeen publicKey'
+      'username email avatar status lastSeen publicKey identityPublicKey'
     );
 
     if (!user) {
@@ -67,7 +101,7 @@ router.get('/search/:query', protect, async (req, res) => {
     const users = await User.find({
       _id: { $ne: currentUserId },
       username: { $regex: query, $options: 'i' }
-    }).select('username email avatar status lastSeen publicKey');
+    }).select('username email avatar status lastSeen publicKey identityPublicKey');
 
     res.status(200).json({
       success: true,

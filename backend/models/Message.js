@@ -20,6 +20,18 @@ const messageSchema = new mongoose.Schema(
       type: String,
       required: true
     },
+    authTag: {
+      type: String,
+      default: null
+    },
+    alg: {
+      type: String,
+      default: 'AES-256-CBC'
+    },
+    version: {
+      type: Number,
+      default: 1
+    },
     isRead: {
       type: Boolean,
       default: false

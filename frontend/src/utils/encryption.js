@@ -1,5 +1,8 @@
 import crypto from 'crypto-js';
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 // Using crypto-js library - install with: npm install crypto-js
 
 // Generate encryption key
@@ -90,4 +93,58 @@ export const getEncryptionKey = (userId) => {
 export const removeEncryptionKey = (userId) => {
   localStorage.removeItem(`enc_key_${userId}`);
   sessionStorage.removeItem(`enc_key_${userId}`);
+};
+
+const uint8ArrayToBase64 = (bytes) => {
+  let binary = '';
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary);
+};
+
+const base64ToUint8Array = (value) => {
+  const binary = atob(value);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+};
+
+export const encryptMessageGCM = async (message, key) => {
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    textEncoder.encode(message)
+  );
+
+  const encryptedBytes = new Uint8Array(encrypted);
+  const authTag = encryptedBytes.slice(encryptedBytes.length - 16);
+  const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - 16);
+
+  return {
+    encryptedMessage: uint8ArrayToBase64(ciphertext),
+    iv: uint8ArrayToBase64(iv),
+    authTag: uint8ArrayToBase64(authTag)
+  };
+};
+
+export const decryptMessageGCM = async (encryptedMessage, key, iv, authTag) => {
+  const ciphertext = base64ToUint8Array(encryptedMessage);
+  const ivBytes = base64ToUint8Array(iv);
+  const tagBytes = base64ToUint8Array(authTag);
+
+  const merged = new Uint8Array(ciphertext.length + tagBytes.length);
+  merged.set(ciphertext, 0);
+  merged.set(tagBytes, ciphertext.length);
+
+  const decrypted = await window.crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: ivBytes },
+    key,
+    merged
+  );
+
+  return textDecoder.decode(decrypted);
 };

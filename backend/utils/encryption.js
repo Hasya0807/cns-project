@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 
-// Generate a random encryption key for each user pair or use a shared key
-// For production, consider using key exchange protocol (e.g., Diffie-Hellman)
+
 const algorithm = 'aes-256-gcm';
 
 /**

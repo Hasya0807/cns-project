@@ -12,12 +12,26 @@ const router = express.Router();
  */
 router.post('/send', protect, async (req, res) => {
   try {
-    const { receiverId, encryptedMessage, iv } = req.body;
+    const { receiverId, encryptedMessage, iv, authTag, alg, version } = req.body;
     const senderId = req.user.id;
+    const normalizedAlg = alg || 'AES-256-CBC';
+    const normalizedVersion = Number(version) || 1;
 
     // Validation
     if (!receiverId || !encryptedMessage || !iv) {
       return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    if (!['AES-256-CBC', 'AES-256-GCM'].includes(normalizedAlg)) {
+      return res.status(400).json({ message: 'Unsupported encryption algorithm' });
+    }
+
+    if (![1, 2].includes(normalizedVersion)) {
+      return res.status(400).json({ message: 'Unsupported encryption version' });
+    }
+
+    if (normalizedAlg === 'AES-256-GCM' && !authTag) {
+      return res.status(400).json({ message: 'authTag is required for AES-256-GCM' });
     }
 
     // Verify receiver exists
@@ -27,15 +41,16 @@ router.post('/send', protect, async (req, res) => {
     }
 
     try {
-      // Store the client-encrypted message (end-to-end encryption)
-      // Server never sees the plaintext message
+
       const newMessage = new Message({
         senderId,
         receiverId,
         encryptedMessage,
         iv,
-        messageHash: '', // Not needed for client-side encryption
-        authTag: '' // Not used in CBC mode
+        authTag: normalizedAlg === 'AES-256-GCM' ? authTag : null,
+        alg: normalizedAlg,
+        version: normalizedVersion,
+        messageHash: '' // Not needed for client-side encryption
       });
 
       await newMessage.save();
@@ -46,6 +61,9 @@ router.post('/send', protect, async (req, res) => {
           id: newMessage._id,
           encryptedMessage: newMessage.encryptedMessage,
           iv: newMessage.iv,
+          authTag: newMessage.authTag,
+          alg: newMessage.alg,
+          version: newMessage.version,
           timestamp: newMessage.createdAt
         }
       });

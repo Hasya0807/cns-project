@@ -48,7 +48,8 @@ router.post('/signup', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        publicKey: user.publicKey
+        publicKey: user.publicKey,
+        identityPublicKey: user.identityPublicKey
       }
     });
   } catch (error) {
@@ -97,7 +98,8 @@ router.post('/login', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        publicKey: user.publicKey
+        publicKey: user.publicKey,
+        identityPublicKey: user.identityPublicKey
       }
     });
   } catch (error) {
