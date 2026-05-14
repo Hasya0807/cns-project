@@ -38,8 +38,8 @@ git push -u origin main
      ```
      PORT=5000
      NODE_ENV=production
-     MONGODB_URI=mongodb+srv://gandhihasya720_db_user:5IsYz7oClXWdjkEb@cluster0.vw4zxmm.mongodb.net/?appName=Cluster0
-     JWT_SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30
+     MONGODB_URI=your_mongodb_atlas_connection_string_here
+     JWT_SECRET=your_strong_jwt_secret_key_here
      CLIENT_URL=https://placeholder.vercel.app
      ```
 5. Click "Deploy"
