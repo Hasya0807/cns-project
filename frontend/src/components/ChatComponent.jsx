@@ -78,7 +78,7 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
     });
 
     socketRef.current.on('receive-message', async (data) => {
-      const { senderId, encryptedMessage, timestamp } = data;
+      const { id, senderId, encryptedMessage, timestamp } = data;
 
       // Show messages from any user, not just selected
       try {
@@ -119,7 +119,7 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
 
         if (senderId === selectedUserId) {
           setMessages(prev => [...prev, {
-            _id: Math.random(),
+            _id: id || `${senderId}-${timestamp}`,
             senderId,
             receiverId: currentUserId,
             message: decrypted,
@@ -132,7 +132,7 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
         // Still add message even if decryption fails, so user knows something arrived
         if (senderId === selectedUserId) {
           setMessages(prev => [...prev, {
-            _id: Math.random(),
+            _id: id || `${senderId}-${timestamp}`,
             senderId,
             receiverId: currentUserId,
             message: '[Failed to decrypt message]',
@@ -380,6 +380,8 @@ const ChatComponent = ({ currentUserId, currentUsername }) => {
       socketRef.current.emit('send-message', {
         senderId: currentUserId,
         receiverId: selectedUserId,
+        messageId: response.data.message.id,
+        timestamp: response.data.message.timestamp,
         encryptedMessage: {
           encryptedMessage: encryptedPayload.encryptedMessage,
           iv: encryptedPayload.iv,

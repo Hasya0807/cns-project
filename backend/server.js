@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const authRoutes = require('./routes/auth');
 const messageRoutes = require('./routes/messages');
 const userRoutes = require('./routes/users');
+const Message = require('./models/Message');
 
 dotenv.config();
 
@@ -51,16 +52,43 @@ io.on('connection', (socket) => {
   });
 
   // Handle new messages
-  socket.on('send-message', (messageData) => {
-    const { receiverId, encryptedMessage, senderId } = messageData;
-    
+  socket.on('send-message', async (messageData) => {
+    const { receiverId, encryptedMessage, senderId, messageId, timestamp } = messageData;
+
+    let resolvedMessageId = messageId;
+    let resolvedTimestamp = timestamp || new Date();
+
+    // Persist on socket path when no pre-saved message id is provided.
+    // This keeps messages available in history even if a client emits socket-only.
+    if (!resolvedMessageId && receiverId && senderId && encryptedMessage?.encryptedMessage && encryptedMessage?.iv) {
+      try {
+        const newMessage = new Message({
+          senderId,
+          receiverId,
+          encryptedMessage: encryptedMessage.encryptedMessage,
+          iv: encryptedMessage.iv,
+          authTag: encryptedMessage.authTag || null,
+          alg: encryptedMessage.alg || 'AES-256-CBC',
+          version: Number(encryptedMessage.version) || 1,
+          messageHash: ''
+        });
+
+        await newMessage.save();
+        resolvedMessageId = newMessage._id.toString();
+        resolvedTimestamp = newMessage.createdAt;
+      } catch (error) {
+        console.error('Socket message persistence failed:', error.message);
+      }
+    }
+
     // Emit to receiver if online (don't send encryption key over socket)
     if (onlineUsers.has(receiverId)) {
       const receiverSocketId = onlineUsers.get(receiverId);
       io.to(receiverSocketId).emit('receive-message', {
+        id: resolvedMessageId,
         senderId,
         encryptedMessage,
-        timestamp: new Date()
+        timestamp: resolvedTimestamp
       });
     }
   });

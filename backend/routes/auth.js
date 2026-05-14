@@ -14,21 +14,20 @@ router.post('/signup', async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Validation
+ 
     if (!username || !email || !password) {
       return res.status(400).json({ message: 'Please provide all required fields' });
     }
 
-    // Check if user already exists
+ 
     let user = await User.findOne({ $or: [{ email }, { username }] });
     if (user) {
       return res.status(400).json({ message: 'User already exists' });
     }
 
-    // Generate a public key (in real app, use proper key exchange)
     const publicKey = generateKey().toString('hex');
 
-    // Create user
+    
     user = new User({
       username,
       email,
@@ -38,7 +37,7 @@ router.post('/signup', async (req, res) => {
 
     await user.save();
 
-    // Generate token
+  
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -48,8 +47,7 @@ router.post('/signup', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        publicKey: user.publicKey,
-        identityPublicKey: user.identityPublicKey
+        publicKey: user.publicKey
       }
     });
   } catch (error) {
@@ -98,8 +96,7 @@ router.post('/login', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        publicKey: user.publicKey,
-        identityPublicKey: user.identityPublicKey
+        publicKey: user.publicKey
       }
     });
   } catch (error) {

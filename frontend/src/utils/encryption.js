@@ -103,6 +103,14 @@ const uint8ArrayToBase64 = (bytes) => {
   return btoa(binary);
 };
 
+const hexToUint8Array = (value) => {
+  const out = new Uint8Array(value.length / 2);
+  for (let i = 0; i < value.length; i += 2) {
+    out[i / 2] = parseInt(value.slice(i, i + 2), 16);
+  }
+  return out;
+};
+
 const base64ToUint8Array = (value) => {
   const binary = atob(value);
   const out = new Uint8Array(binary.length);
@@ -110,6 +118,18 @@ const base64ToUint8Array = (value) => {
     out[i] = binary.charCodeAt(i);
   }
   return out;
+};
+
+const isHexString = (value) => /^[0-9a-fA-F]+$/.test(value) && value.length % 2 === 0;
+
+const decodeBytes = (value, encoding) => {
+  const normalizedValue = String(value || '').trim();
+
+  if (encoding === 'hex') {
+    return hexToUint8Array(normalizedValue);
+  }
+
+  return base64ToUint8Array(normalizedValue);
 };
 
 export const encryptMessageGCM = async (message, key) => {
@@ -132,19 +152,47 @@ export const encryptMessageGCM = async (message, key) => {
 };
 
 export const decryptMessageGCM = async (encryptedMessage, key, iv, authTag) => {
-  const ciphertext = base64ToUint8Array(encryptedMessage);
-  const ivBytes = base64ToUint8Array(iv);
-  const tagBytes = base64ToUint8Array(authTag);
+  const ciphertextEncoding = isHexString(String(encryptedMessage || '').trim()) ? 'hex' : 'base64';
+  const ivEncoding = isHexString(String(iv || '').trim()) ? 'hex' : 'base64';
+  const tagEncoding = isHexString(String(authTag || '').trim()) ? 'hex' : 'base64';
 
-  const merged = new Uint8Array(ciphertext.length + tagBytes.length);
-  merged.set(ciphertext, 0);
-  merged.set(tagBytes, ciphertext.length);
+  const attempts = [
+    {
+      ciphertext: decodeBytes(encryptedMessage, ciphertextEncoding),
+      ivBytes: decodeBytes(iv, ivEncoding),
+      tagBytes: decodeBytes(authTag, tagEncoding)
+    }
+  ];
 
-  const decrypted = await window.crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: ivBytes },
-    key,
-    merged
-  );
+  const alternateAttempt = {
+    ciphertext: decodeBytes(encryptedMessage, ciphertextEncoding === 'hex' ? 'base64' : 'hex'),
+    ivBytes: decodeBytes(iv, ivEncoding === 'hex' ? 'base64' : 'hex'),
+    tagBytes: decodeBytes(authTag, tagEncoding === 'hex' ? 'base64' : 'hex')
+  };
 
-  return textDecoder.decode(decrypted);
+  if (encryptedMessage && iv && authTag) {
+    attempts.push(alternateAttempt);
+  }
+
+  let lastError;
+
+  for (const attempt of attempts) {
+    try {
+      const merged = new Uint8Array(attempt.ciphertext.length + attempt.tagBytes.length);
+      merged.set(attempt.ciphertext, 0);
+      merged.set(attempt.tagBytes, attempt.ciphertext.length);
+
+      const decrypted = await window.crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: attempt.ivBytes },
+        key,
+        merged
+      );
+
+      return textDecoder.decode(decrypted);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError;
 };
